@@ -1,1 +1,1 @@
-Updated version
+Refactor 2D floor plan with SpriteKit for accurate 3D to 2D projection Add rotation field to RoomStructureData.
