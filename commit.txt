@@ -1,1 +1,1 @@
-2D plan improvements
+Thin walls and added windows
