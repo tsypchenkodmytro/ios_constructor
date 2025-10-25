@@ -1,1 +1,1 @@
-icon
+Setup architecture and framework
