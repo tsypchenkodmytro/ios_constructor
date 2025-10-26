@@ -1,1 +1,1 @@
-Fix 2D floor plan rendering with SpriteKit-based projection
+Updated version
