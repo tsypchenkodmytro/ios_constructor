@@ -1,1 +1,1 @@
-Fix screen timeout and dded units
+2D plan improvements
