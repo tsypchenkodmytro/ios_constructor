@@ -1,1 +1,1 @@
-icon
+Added 2D floor plan share feature (png)
