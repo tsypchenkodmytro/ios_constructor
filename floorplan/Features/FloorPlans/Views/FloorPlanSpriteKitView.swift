@@ -8,11 +8,32 @@
 import SwiftUI
 import SpriteKit
 
+// Viewport transform for proper coordinate handling
+struct Viewport {
+    var scale: CGFloat      // zoom (>0)
+    var rotation: CGFloat   // radians, CCW
+    var translation: CGPoint // pan in points (screen)
+    
+    var affine: CGAffineTransform {
+        CGAffineTransform.identity
+            .translatedBy(x: translation.x, y: translation.y)
+            .rotated(by: rotation)
+            .scaledBy(x: scale, y: scale)
+    }
+    
+    // Linear part (no translation) for direction vectors
+    var linear: CGAffineTransform {
+        CGAffineTransform.identity
+            .rotated(by: rotation)
+            .scaledBy(x: scale, y: scale)
+    }
+}
+
 struct FloorPlanSpriteKitView: View {
     let roomStructure: RoomStructureData
     let roomName: String
     @State private var showMeasurements = true
-    @State private var useImperialUnits = false
+    @State private var useImperialUnits = true
     @State private var sceneRef: FloorPlanScene?
     @State private var showShareSheet = false
     @State private var shareItems: [Any] = []
@@ -257,7 +278,7 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
     
     private let hapticGenerator = UIImpactFeedbackGenerator(style: .light)
     
-    init(roomStructure: RoomStructureData, roomName: String, size: CGSize, showMeasurements: Bool = true, useImperialUnits: Bool = false) {
+    init(roomStructure: RoomStructureData, roomName: String, size: CGSize, showMeasurements: Bool = true, useImperialUnits: Bool = true) {
         self.roomStructure = roomStructure
         self.roomName = roomName
         self.showMeasurements = showMeasurements
@@ -319,7 +340,7 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
         windowsLayer.zPosition = 2
         contentNode.addChild(windowsLayer)
         
-        // Labels layer outside contentNode so they don't scale
+        // Labels layer outside contentNode for screen-space positioning
         labelsLayer = SKNode()
         labelsLayer.zPosition = 10
         addChild(labelsLayer)
@@ -580,32 +601,65 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
         }
     }
 
+    // Get current viewport state
+    private var currentViewport: Viewport {
+        return Viewport(
+            scale: contentNode.xScale * initialScale,
+            rotation: contentNode.zRotation,
+            translation: contentNode.position
+        )
+    }
+    
     private func addMeasurements() {
         labelsLayer.removeAllChildren()
         
         guard showMeasurements else { return }
         
+        let viewport = currentViewport
+        let metersPerPoint: CGFloat = 1.0 / initialScale  // Convert from initial scale points to meters
+        let labelOffsetPts: CGFloat = 15    // Screen-space offset from wall
+        
+        // Calculate dynamic font size based on zoom level
+        // Scale down gradually when zooming out, but never completely hide
+        let zoomRatio = currentScale / initialScale
+        let minFontSize: CGFloat = 6.0  // Minimum readable size
+        let maxFontSize: CGFloat = 14.0  // Maximum size at normal zoom
+        
+        // Use a power curve for gradual scaling: slower reduction when zooming out
+        let fontScale = pow(zoomRatio, 0.3)  // 0.3 power makes it scale very slowly
+        let baseFontSize = max(minFontSize, min(maxFontSize, maxFontSize * fontScale))
+        
         // Add measurements for walls
         for wall in roomStructure.walls {
-            addMeasurement(for: wall)
+            addScreenSpaceMeasurement(for: wall, viewport: viewport, 
+                                    metersPerPoint: metersPerPoint, 
+                                    labelOffset: labelOffsetPts, 
+                                    fontSize: baseFontSize,
+                                    flipOffset: false)
         }
         
-        // Add measurements for doors
+        // Add measurements for windows - flip offset to show on inner side
+        for window in roomStructure.windows {
+            addScreenSpaceMeasurement(for: window, viewport: viewport, 
+                                    metersPerPoint: metersPerPoint, 
+                                    labelOffset: labelOffsetPts, 
+                                    fontSize: baseFontSize,
+                                    flipOffset: true)
+        }
+        
+        // Add measurements for doors - position along the door swing arc
         for door in roomStructure.doors {
-            addMeasurement(for: door)
+            addDoorMeasurement(for: door, viewport: viewport, 
+                             metersPerPoint: metersPerPoint, 
+                             fontSize: baseFontSize)
         }
     }
     
     private func addMeasurement(for surface: RoomStructureData.Surface) {
         let (start, end) = calculateWallEndpoints(surface: surface)
         
-        // Convert to scene coordinates (considering contentNode position and scale)
-        let sceneStart = contentNode.convert(start, to: self)
-        let sceneEnd = contentNode.convert(end, to: self)
-        let sceneMidpoint = CGPoint(x: (sceneStart.x + sceneEnd.x) / 2, y: (sceneStart.y + sceneEnd.y) / 2)
-        
-        // Calculate distance in screen space to determine if label should be shown
-        let screenDistance = hypot(sceneEnd.x - sceneStart.x, sceneEnd.y - sceneStart.y)
+        // Calculate midpoint in content coordinates
+        let midpoint = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
         
         let distance = hypot(end.x - start.x, end.y - start.y) / currentScale
         let meters = Float(distance)
@@ -613,16 +667,13 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
         // Skip very small measurements
         guard meters > 0.1 else { return }
         
-        // Calculate zoom-aware font size (like Apple Maps)
-        // Scale between 8pt (zoomed out) and 14pt (zoomed in)
-        let zoomRatio = currentScale / initialScale
-        let minFontSize: CGFloat = 8.0
-        let maxFontSize: CGFloat = 14.0
-        let fontSize = min(maxFontSize, max(minFontSize, Constants.measurementFontSize * sqrt(zoomRatio)))
+        // Use consistent font size that scales with content
+        let fontSize: CGFloat = Constants.measurementFontSize
         
-        // Hide labels if wall is too short on screen (prevents overlap)
-        let minScreenDistance: CGFloat = fontSize * 3.5
-        guard screenDistance > minScreenDistance else { return }
+        // Calculate minimum wall length for showing labels (in content coordinates)
+        let wallLength = hypot(end.x - start.x, end.y - start.y)
+        let minWallLength: CGFloat = fontSize * 4.0
+        guard wallLength > minWallLength else { return }
         
         // Format measurement based on unit preference
         let measurementText: String
@@ -643,37 +694,33 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
         }
         
         // Calculate angle of the wall
-        let wallAngle = atan2(sceneEnd.y - sceneStart.y, sceneEnd.x - sceneStart.x)
+        let wallAngle = atan2(end.y - start.y, end.x - start.x)
         let absAngle = abs(wallAngle)
         
         // Determine if wall is more horizontal or vertical
         let isHorizontal = absAngle < .pi / 4 || absAngle > 3 * .pi / 4
         
         // Calculate stroke width based on font size
-        let strokeWidth = max(2.0, fontSize / 6.0)
+        let strokeWidth = max(1.0, fontSize / 8.0)
         
         // Create text label with stroke for visibility
         let label = SKLabelNode(text: measurementText)
-        label.position = sceneMidpoint
+        label.position = midpoint  // Use content coordinates
         label.fontSize = fontSize
         label.fontColor = .black
         label.fontName = "Helvetica-Bold"
         label.verticalAlignmentMode = .center
         label.horizontalAlignmentMode = .center
         
-        // Add black stroke for contrast (simplified - only 4 directions for performance)
-        let strokeLabel = label.copy() as! SKLabelNode
-        strokeLabel.fontColor = .white
-        strokeLabel.position = sceneMidpoint
-        strokeLabel.zPosition = -1
-        
-        // Create stroke effect (4 directions instead of 8 for better performance)
+        // Add white stroke for contrast (simplified - only 4 directions for performance)
         for offset in [CGPoint(x: -strokeWidth, y: 0),
                        CGPoint(x: strokeWidth, y: 0),
                        CGPoint(x: 0, y: -strokeWidth),
                        CGPoint(x: 0, y: strokeWidth)] {
-            let stroke = strokeLabel.copy() as! SKLabelNode
-            stroke.position = CGPoint(x: sceneMidpoint.x + offset.x, y: sceneMidpoint.y + offset.y)
+            let stroke = label.copy() as! SKLabelNode
+            stroke.fontColor = .white
+            stroke.position = CGPoint(x: midpoint.x + offset.x, y: midpoint.y + offset.y)
+            stroke.zPosition = -1
             
             // Align text horizontally or vertically based on wall orientation
             if isHorizontal {
@@ -691,6 +738,235 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
         } else {
             label.zRotation = .pi / 2
         }
+        
+        labelsLayer.addChild(label)
+    }
+    
+    private func addScreenSpaceMeasurement(
+        for surface: RoomStructureData.Surface,
+        viewport: Viewport,
+        metersPerPoint: CGFloat,
+        labelOffset: CGFloat,
+        fontSize: CGFloat,
+        flipOffset: Bool = false
+    ) {
+        // Get world endpoints (without any transform applied)
+        let centerX = CGFloat(surface.position.x)
+        let centerZ = -CGFloat(surface.position.z)
+        let width = CGFloat(surface.dimensions.x)
+        let rotation = CGFloat(surface.rotation)
+        
+        let halfWidth = width / 2
+        let dx = halfWidth * cos(rotation)
+        let dz = -halfWidth * sin(rotation)
+        
+        let p1 = CGPoint(x: centerX - dx, y: centerZ - dz)
+        let p2 = CGPoint(x: centerX + dx, y: centerZ + dz)
+        
+        // Transform world points to screen space
+        let T = viewport.affine
+        let L = viewport.linear
+        
+        let s1 = p1.applying(T)
+        let s2 = p2.applying(T)
+        
+        // Calculate world direction and screen direction
+        let dWorld = CGPoint(x: p2.x - p1.x, y: p2.y - p1.y)
+        let dScreen = dWorld.applying(L)
+        
+        // Length in world (meters) - surface.dimensions.x is already in meters
+        let lengthMeters = CGFloat(surface.dimensions.x)
+        
+        // Skip very small measurements
+        guard lengthMeters > 0.1 else { return }
+        
+        // Check if wall is long enough on screen to show label
+        let screenWallLength = hypot(dScreen.x, dScreen.y)
+        let minScreenWallLength: CGFloat = fontSize * 4.0
+        guard screenWallLength > minScreenWallLength else { return }
+        
+        // Format measurement text
+        let measurementText = formatMeasurement(lengthMeters)
+        
+        // Calculate angle on screen with upright rule
+        var angle = atan2(dScreen.y, dScreen.x)
+        if cos(angle) < 0 { 
+            angle += .pi  // Upright rule: never upside-down
+        }
+        
+        // Screen midpoint
+        let midScreen = CGPoint(x: (s1.x + s2.x) * 0.5, y: (s1.y + s2.y) * 0.5)
+        
+        // Normal offset (perpendicular to wall direction)
+        let n = CGPoint(x: -dScreen.y, y: dScreen.x)  // Normal vector
+        let nlen = max(1e-6, hypot(n.x, n.y))
+        let un = CGPoint(x: n.x / nlen, y: n.y / nlen)  // Unit normal
+        
+        // Flip the offset direction for windows to show on inner side
+        let offsetMultiplier: CGFloat = flipOffset ? -1.0 : 1.0
+        
+        let labelPosition = CGPoint(
+            x: midScreen.x + un.x * labelOffset * offsetMultiplier,
+            y: midScreen.y + un.y * labelOffset * offsetMultiplier
+        )
+        
+        // Create screen-space label
+        createScreenSpaceLabel(
+            text: measurementText,
+            at: labelPosition,
+            angle: angle,
+            fontSize: fontSize
+        )
+    }
+    
+    private func addDoorMeasurement(
+        for door: RoomStructureData.Surface,
+        viewport: Viewport,
+        metersPerPoint: CGFloat,
+        fontSize: CGFloat
+    ) {
+        // Get world endpoints (without any transform applied)
+        let centerX = CGFloat(door.position.x)
+        let centerZ = -CGFloat(door.position.z)
+        let width = CGFloat(door.dimensions.x)
+        let rotation = CGFloat(door.rotation)
+        
+        let halfWidth = width / 2
+        let dx = halfWidth * cos(rotation)
+        let dz = -halfWidth * sin(rotation)
+        
+        let p1 = CGPoint(x: centerX - dx, y: centerZ - dz)
+        let p2 = CGPoint(x: centerX + dx, y: centerZ + dz)
+        
+        // Transform world points to screen space
+        let T = viewport.affine
+        let L = viewport.linear
+        
+        let s1 = p1.applying(T)
+        let s2 = p2.applying(T)
+        
+        // Calculate world direction and screen direction
+        let dWorld = CGPoint(x: p2.x - p1.x, y: p2.y - p1.y)
+        let dScreen = dWorld.applying(L)
+        
+        // Length in world (meters)
+        let lengthMeters = CGFloat(door.dimensions.x)
+        
+        // Skip very small measurements
+        guard lengthMeters > 0.1 else { return }
+        
+        // Check if door is long enough on screen to show label
+        let screenDoorLength = hypot(dScreen.x, dScreen.y)
+        let minScreenDoorLength: CGFloat = fontSize * 3.0
+        guard screenDoorLength > minScreenDoorLength else { return }
+        
+        // Format measurement text
+        let measurementText = formatMeasurement(lengthMeters)
+        
+        // Calculate door angle and perpendicular angle
+        let doorAngle = atan2(dScreen.y, dScreen.x)
+        
+        // Calculate the door frame inset (matching the door drawing)
+        let doorFrameInset: CGFloat = 0.1
+        let insetDx = (s2.x - s1.x) * doorFrameInset
+        let insetDy = (s2.y - s1.y) * doorFrameInset
+        let frameStart = CGPoint(x: s1.x + insetDx, y: s1.y + insetDy)
+        
+        // Position the label along the door swing arc
+        // The arc radius matches the door drawing logic
+        let doorWidth = hypot(s2.x - s1.x, s2.y - s1.y)
+        let arcRadius = min(doorWidth * 0.85, 45.0)
+        
+        // Position label at 45 degrees along the arc (middle of the swing)
+        let arcMidAngle = doorAngle - .pi / 4  // 45 degrees into the room
+        
+        // Calculate label position along the arc at about 70% of the radius
+        let labelRadius = arcRadius * 0.7
+        let labelPosition = CGPoint(
+            x: frameStart.x + labelRadius * cos(arcMidAngle),
+            y: frameStart.y + labelRadius * sin(arcMidAngle)
+        )
+        
+        // Calculate angle for text - align with the arc tangent at this point
+        var textAngle = arcMidAngle + .pi / 2  // Tangent to the arc
+        
+        // Apply upright rule
+        if cos(textAngle) < 0 {
+            textAngle += .pi
+        }
+        
+        // Create screen-space label
+        createScreenSpaceLabel(
+            text: measurementText,
+            at: labelPosition,
+            angle: textAngle,
+            fontSize: fontSize
+        )
+    }
+    
+    private func formatMeasurement(_ meters: CGFloat) -> String {
+        if useImperialUnits {
+            // Convert meters to feet and inches
+            let totalInches = meters * 39.3701  // 1 meter = 39.3701 inches
+            let feet = Int(totalInches / 12)
+            let inches = Int(totalInches.truncatingRemainder(dividingBy: 12))
+            
+            if feet > 0 {
+                return "\(feet)' \(inches)\""
+            } else {
+                return "\(inches)\""
+            }
+        } else {
+            // Metric units - always show in meters with appropriate precision
+            if meters >= 10.0 {
+                return String(format: "%.1f m", meters)
+            } else if meters >= 1.0 {
+                return String(format: "%.2f m", meters)
+            } else {
+                // For values less than 1m (like doors), show with 2 decimal places
+                return String(format: "%.2f m", meters)
+            }
+        }
+    }
+    
+    private func createScreenSpaceLabel(
+        text: String,
+        at position: CGPoint,
+        angle: CGFloat,
+        fontSize: CGFloat
+    ) {
+        // Create white stroke for contrast (background)
+        let strokeWidth = max(2.0, fontSize / 6.0)
+        
+        // Create 8-direction stroke for better visibility
+        let strokeAngles: [CGFloat] = [0, .pi/4, .pi/2, 3 * .pi/4, .pi, 5 * .pi/4, 3 * .pi/2, 7 * .pi/4]
+        for strokeAngle in strokeAngles {
+            let offsetX = strokeWidth * cos(strokeAngle)
+            let offsetY = strokeWidth * sin(strokeAngle)
+            
+            let stroke = SKLabelNode(text: text)
+            stroke.position = CGPoint(x: position.x + offsetX, y: position.y + offsetY)
+            stroke.fontSize = fontSize
+            stroke.fontColor = .white
+            stroke.fontName = "Helvetica-Bold"
+            stroke.verticalAlignmentMode = .center
+            stroke.horizontalAlignmentMode = .center
+            stroke.zRotation = angle
+            stroke.zPosition = -1
+            
+            labelsLayer.addChild(stroke)
+        }
+        
+        // Create main label on top
+        let label = SKLabelNode(text: text)
+        label.position = position
+        label.fontSize = fontSize
+        label.fontColor = .black
+        label.fontName = "Helvetica-Bold"
+        label.verticalAlignmentMode = .center
+        label.horizontalAlignmentMode = .center
+        label.zRotation = angle
+        label.zPosition = 0
         
         labelsLayer.addChild(label)
     }
@@ -737,6 +1013,9 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             
             contentNode.position = newPosition
             
+            // Update measurement positions for screen-space positioning
+            addMeasurements()
+            
         case .ended, .cancelled:
             // Optional: Add momentum/deceleration here if desired
             break
@@ -759,7 +1038,7 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             contentNode.setScale(targetScale)
             currentScale = newScale
             
-            // Update measurements to stay fixed size
+            // Update measurements visibility based on zoom level
             addMeasurements()
         }
         
@@ -774,6 +1053,9 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             
             // Reset the gesture rotation to get incremental changes
             gesture.rotation = 0
+            
+            // Update measurement positions for screen-space positioning
+            addMeasurements()
             
         case .ended, .cancelled:
             // Optional: Add snap-to-angle behavior here if desired
