@@ -2,7 +2,7 @@
 //  RoomScanView.swift
 //  floorplan
 //
-//  Clean scan view with state machine and view model
+//  Standard Apple RoomPlan implementation
 //
 
 import SwiftUI
@@ -14,6 +14,8 @@ struct RoomScanView: View {
     @StateObject private var viewModel: ScanViewModel
     @State private var showErrorAlert = false
     @State private var saveSuccess = false
+    @State private var errorId: UUID?
+    @Environment(\.dismiss) private var dismiss
     
     init() {
         let service = RoomPlanService()
@@ -27,11 +29,14 @@ struct RoomScanView: View {
             Color.black.ignoresSafeArea()
             
             // Camera View
-            cameraView
-            
-            // Loading Overlay
-            if case .initializing = service.state {
-                loadingOverlay
+            if let captureView = service.getCaptureView() {
+                RoomCaptureViewWrapper(captureView: captureView)
+                    .ignoresSafeArea()
+                    .id(service.sessionId) // Force recreation when session changes
+            } else if service.isInitialized {
+                readyPlaceholder
+            } else {
+                cameraPlaceholder
             }
             
             // Gradient Overlay
@@ -46,23 +51,27 @@ struct RoomScanView: View {
                 Spacer()
             }
             
-            // UI Overlays
-            VStack(spacing: 12) {
-                // Status Indicators
-                if viewModel.isScanning {
-                    scanningStatusView
+            // UI Overlays (only show when initialized)
+            if service.isInitialized {
+                VStack(spacing: 0) {
+                    // Status Indicators
+                    if viewModel.isScanning {
+                        scanningStatusView
+                            .padding(.top, 80) // Move down to avoid overlap
+                    }
+                    
+                    // Tips Button
+                    if !viewModel.isScanning && viewModel.capturedRoom == nil {
+                        tipsButton
+                            .padding(.top, 80)
+                    }
+                    
+                    Spacer()
+                    
+                    // Control Panel
+                    controlPanel
+                        .padding(.bottom, 40)
                 }
-                
-                // Tips Button
-                if viewModel.isReady {
-                    tipsButton
-                }
-                
-                Spacer()
-                
-                // Control Panel
-                controlPanel
-                    .padding(.bottom, 40)
             }
         }
         .sheet(isPresented: $viewModel.showSaveSheet) {
@@ -82,8 +91,9 @@ struct RoomScanView: View {
         } message: {
             Text(viewModel.error?.localizedDescription ?? "An unknown error occurred")
         }
-        .onChange(of: service.state) { _, newState in
-            if case .failed = newState {
+        .onChange(of: service.errorId) { _, newErrorId in
+            // Only show alert for errors when NOT scanning (errors during scan show inline)
+            if newErrorId != nil && !viewModel.isScanning {
                 showErrorAlert = true
             }
         }
@@ -94,40 +104,29 @@ struct RoomScanView: View {
                 saveSuccess = false
             }
         }
-        .task {
-            await viewModel.initialize()
-        }
         .onAppear {
             // Prevent screen from sleeping during scanning
             UIApplication.shared.isIdleTimerDisabled = true
         }
         .onDisappear {
-            // Re-enable screen timeout when leaving scan screen
+            // Re-enable screen timeout
             UIApplication.shared.isIdleTimerDisabled = false
+            // Cleanup when view disappears
             viewModel.cleanup()
+            // Reset service for fresh start next time
+            service.reset()
         }
     }
     
     // MARK: - Subviews
     
-    private var cameraView: some View {
-        Group {
-            if let captureView = service.captureView {
-                RoomCaptureViewRepresentable(captureView: captureView)
-                    .ignoresSafeArea()
-            } else {
-                cameraPlaceholder
-            }
-        }
-    }
-    
     private var cameraPlaceholder: some View {
         VStack(spacing: 20) {
-            Image(systemName: "camera.fill")
-                .font(.system(size: 60))
-                .foregroundColor(.white.opacity(0.6))
+            ProgressView()
+                .scaleEffect(1.5)
+                .tint(.white)
             
-            Text("Camera Initializing...")
+            Text("Initializing Scanner...")
                 .font(.headline)
                 .foregroundColor(.white)
             
@@ -141,19 +140,26 @@ struct RoomScanView: View {
         }
     }
     
-    private var loadingOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.7)
-                .ignoresSafeArea()
+    private var readyPlaceholder: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "viewfinder")
+                .font(.system(size: 60))
+                .foregroundColor(.blue)
             
-            VStack(spacing: 20) {
-                ProgressView()
-                    .scaleEffect(1.5)
-                    .tint(.white)
+            Text("Ready to Scan")
+                .font(.headline)
+                .foregroundColor(.white)
+            
+            VStack(spacing: 8) {
+                Text("Press play to start scanning")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.7))
                 
-                Text("Initializing 3D Scanner...")
-                    .font(.headline)
-                    .foregroundColor(.white)
+                Text("Tip: Hold device steady for 2-3 seconds after starting")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
             }
         }
     }
@@ -176,40 +182,29 @@ struct RoomScanView: View {
                     .foregroundColor(.white)
             }
             
-            // Scan timer
-            if viewModel.scanDuration > 0 {
-                Text(viewModel.formatDuration(viewModel.scanDuration))
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(.white.opacity(0.8))
-            }
-            
-            // Quality indicator
-            HStack(spacing: 4) {
-                Image(systemName: viewModel.scanQuality.icon)
-                    .font(.caption2)
-                    .foregroundColor(viewModel.scanQuality.color)
-                Text(viewModel.scanQuality.text)
-                    .font(.caption2)
-                    .foregroundColor(viewModel.scanQuality.color)
-            }
-            
-            // Stuck indicator
-            if viewModel.isStuck {
+            // Show error message or default instruction
+            if let error = viewModel.error {
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption2)
                         .foregroundColor(.orange)
-                    Text("Try moving around the room")
+                    Text(error.localizedDescription.contains("tracking") 
+                         ? "Hold steady, then move slowly" 
+                         : error.localizedDescription)
                         .font(.caption2)
                         .foregroundColor(.orange)
+                        .lineLimit(2)
                 }
+            } else {
+                Text("Move slowly around the room")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.8))
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 24)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .padding(.top, 60)
     }
     
     private var tipsButton: some View {
@@ -225,13 +220,12 @@ struct RoomScanView: View {
             .background(.blue.opacity(0.8))
             .clipShape(Capsule())
         }
-        .padding(.top, 60)
     }
     
     private var controlPanel: some View {
         HStack(spacing: 16) {
-            // Flashlight toggle (when ready)
-            if viewModel.isReady {
+            // Flashlight toggle (only when scanning)
+            if viewModel.isScanning {
                 Button(action: { viewModel.toggleFlashlight() }) {
                     ZStack {
                         Circle()
@@ -246,31 +240,13 @@ struct RoomScanView: View {
                 }
             }
             
-            // Restart button (when stuck)
-            if viewModel.isStuck {
-                Button(action: { viewModel.restartScanning() }) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 50, height: 50)
-                            .shadow(color: Color.orange.opacity(0.4), radius: 8)
-                        
-                        Image(systemName: "arrow.clockwise")
-                            .font(.title3)
-                            .foregroundColor(.white)
-                    }
-                }
-            }
-            
             // Main scan button
             Button(action: {
                 if viewModel.isScanning {
                     viewModel.stopScanning()
                 } else {
-                    // If there's a completed scan, reset first
-                    if viewModel.capturedRoom != nil {
-                        viewModel.reset()
-                    }
+                    // Always reset before starting to ensure fresh state
+                    viewModel.reset()
                     viewModel.startScanning()
                 }
             }) {
@@ -285,7 +261,6 @@ struct RoomScanView: View {
                         .foregroundColor(.white)
                 }
             }
-            .disabled(!viewModel.isReady && !viewModel.isScanning && viewModel.capturedRoom == nil)
             
             // Save button (when scan is completed)
             if viewModel.capturedRoom != nil && !viewModel.isScanning {
@@ -307,13 +282,12 @@ struct RoomScanView: View {
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.isScanning)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.isStuck)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.capturedRoom != nil)
     }
 }
 
 // MARK: - UIViewRepresentable Wrapper
-struct RoomCaptureViewRepresentable: UIViewRepresentable {
+struct RoomCaptureViewWrapper: UIViewRepresentable {
     let captureView: RoomCaptureView
     
     func makeUIView(context: Context) -> RoomCaptureView {
@@ -322,11 +296,7 @@ struct RoomCaptureViewRepresentable: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: RoomCaptureView, context: Context) {
-        // No manual updates needed
-    }
-    
-    static func dismantleUIView(_ uiView: RoomCaptureView, coordinator: ()) {
-        print("🧹 Dismantling RoomCaptureView")
+        // No updates needed
     }
 }
 

@@ -2,168 +2,168 @@
 //  RoomPlanService.swift
 //  floorplan
 //
-//  Clean wrapper for Apple's RoomPlan framework with state machine
+//  Standard Apple RoomPlan implementation following official patterns
 //
 
 import RoomPlan
 import SwiftUI
 import Combine
 
-// MARK: - Scan State Machine
-enum ScanState: Equatable {
-    case uninitialized
-    case initializing
-    case ready
-    case scanning
-    case processing
-    case completed(CapturedRoom)
-    case failed(Error)
-    
-    static func == (lhs: ScanState, rhs: ScanState) -> Bool {
-        switch (lhs, rhs) {
-        case (.uninitialized, .uninitialized),
-             (.initializing, .initializing),
-             (.ready, .ready),
-             (.scanning, .scanning),
-             (.processing, .processing):
-            return true
-        case (.completed, .completed),
-             (.failed, .failed):
-            return true
-        default:
-            return false
-        }
-    }
-    
-    var isScanning: Bool {
-        if case .scanning = self { return true }
-        return false
-    }
-    
-    var isReady: Bool {
-        if case .ready = self { return true }
-        return false
-    }
-    
-    var capturedRoom: CapturedRoom? {
-        if case .completed(let room) = self { return room }
-        return nil
-    }
-    
-    var error: Error? {
-        if case .failed(let error) = self { return error }
-        return nil
-    }
-}
-
 // MARK: - RoomPlanService
 @MainActor
 class RoomPlanService: ObservableObject {
-    @Published private(set) var state: ScanState = .uninitialized
+    @Published var capturedRoom: CapturedRoom?
+    @Published var error: Error?
+    @Published var errorId: UUID?
+    @Published var isScanning = false
+    @Published var isInitialized = false
+    @Published var sessionId = UUID()
     
-    private(set) var captureView: RoomCaptureView?
-    private var delegate: RoomCaptureDelegate?
+    private var roomCaptureView: RoomCaptureView?
+    private var captureDelegate: RoomCaptureSessionDelegate?
+    private var sessionConfig = RoomCaptureSession.Configuration()
     
     init() {
         print("🚀 RoomPlanService initialized")
+        // Check if RoomPlan is supported and mark as initialized
+        Task { @MainActor in
+            if RoomCaptureSession.isSupported {
+                isInitialized = true
+                print("✅ RoomPlan ready")
+            } else {
+                error = RoomPlanError.deviceNotSupported
+                errorId = UUID()
+                print("❌ RoomPlan not supported")
+            }
+        }
     }
     
     deinit {
         print("🧹 RoomPlanService deinitialized")
-        captureView?.captureSession.stop()
-        captureView = nil
-        delegate = nil
+        // Stop session synchronously without MainActor
+        roomCaptureView?.captureSession.stop()
     }
     
     // MARK: - Public Methods
     
-    func initialize() async throws {
-        guard state == .uninitialized else {
-            print("⚠️ Already initialized, current state: \(state)")
-            return
-        }
-        
-        state = .initializing
-        print("🔧 Initializing RoomPlanService...")
-        
+    func startSession() {
         guard RoomCaptureSession.isSupported else {
-            let error = RoomPlanError.deviceNotSupported
-            state = .failed(error)
-            throw error
-        }
-        
-        // Create capture view
-        let view = RoomCaptureView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
-        let del = RoomCaptureDelegate(service: self)
-        view.delegate = del
-        
-        self.captureView = view
-        self.delegate = del
-        
-        state = .ready
-        print("✅ RoomPlanService ready")
-    }
-    
-    func startScanning() throws {
-        guard case .ready = state else {
-            print("❌ Cannot start scanning from state: \(state)")
-            throw RoomPlanError.invalidState
-        }
-        
-        guard let captureView = captureView else {
-            throw RoomPlanError.initializationFailed
-        }
-        
-        print("▶️ Starting scan...")
-        state = .scanning
-        
-        let config = RoomCaptureSession.Configuration()
-        captureView.captureSession.run(configuration: config)
-        
-        print("✅ Scanning started")
-    }
-    
-    func stopScanning() {
-        guard case .scanning = state else {
-            print("⚠️ Not currently scanning, state: \(state)")
+            error = RoomPlanError.deviceNotSupported
             return
         }
         
-        print("⏹️ Stopping scan...")
-        state = .processing
+        // Always create a fresh capture view for each session
+        let captureView = RoomCaptureView(frame: .zero)
+        let delegate = RoomCaptureSessionDelegate(service: self)
+        captureView.delegate = delegate
+        roomCaptureView = captureView
+        captureDelegate = delegate
         
-        captureView?.captureSession.stop()
+        // Generate new session ID to trigger view update
+        sessionId = UUID()
+        
+        // Start the session
+        captureView.captureSession.run(configuration: sessionConfig)
+        isScanning = true
+        capturedRoom = nil
+        error = nil
+        errorId = nil
+        print("▶️ RoomPlan session started with fresh capture view (ID: \(sessionId))")
+    }
+    
+    func stopSession() {
+        guard let captureView = roomCaptureView else { return }
+        captureView.captureSession.stop()
+        isScanning = false
+        print("⏹️ RoomPlan session stopped")
+    }
+    
+    func getCaptureView() -> RoomCaptureView? {
+        return roomCaptureView
     }
     
     func reset() {
-        print("🔄 Resetting service...")
+        stopSession()
         
-        // Stop scanning if active
-        if case .scanning = state {
-            captureView?.captureSession.stop()
-        }
+        // Clear everything for fresh start (but keep initialized state)
+        roomCaptureView = nil
+        captureDelegate = nil
+        capturedRoom = nil
+        error = nil
+        errorId = nil
         
-        // Return to ready state
-        state = .ready
-        print("✅ Service reset to ready state")
+        print("🔄 RoomPlanService reset - ready for fresh start")
     }
     
     // MARK: - Internal Methods
     
-    func handleScanCompletion(room: CapturedRoom) {
-        print("✅ Scan completed successfully")
-        state = .completed(room)
+    func handleCapturedRoom(_ room: CapturedRoom) {
+        capturedRoom = room
+        isScanning = false
     }
     
-    func handleScanError(_ error: Error) {
-        print("❌ Scan failed: \(error.localizedDescription)")
-        state = .failed(error)
+    func handleError(_ error: Error) {
+        self.error = error
+        self.errorId = UUID()
+        
+        // Don't stop scanning for tracking errors - they're often temporary
+        let errorDescription = error.localizedDescription.lowercased()
+        if !errorDescription.contains("tracking") {
+            isScanning = false
+        }
+    }
+}
+
+// MARK: - Delegate Class
+@objc(FloorPlanRoomCaptureSessionDelegate)
+private class RoomCaptureSessionDelegate: NSObject, RoomCaptureViewDelegate, NSCoding {
+    weak var service: RoomPlanService?
+    
+    init(service: RoomPlanService) {
+        self.service = service
+        super.init()
     }
     
-    private func cleanup() {
-        captureView?.captureSession.stop()
-        captureView = nil
-        delegate = nil
+    // MARK: - NSCoding
+    required init?(coder: NSCoder) {
+        super.init()
+    }
+    
+    func encode(with coder: NSCoder) {
+        // No encoding needed for delegate
+    }
+    
+    func captureView(shouldPresent roomDataForProcessing: CapturedRoomData, error: Error?) -> Bool {
+        if let error = error {
+            print("❌ Processing error: \(error.localizedDescription)")
+            Task { @MainActor in
+                self.service?.handleError(error)
+            }
+            return false
+        }
+        return true
+    }
+    
+    func captureView(didPresent processedResult: CapturedRoom, error: Error?) {
+        if let error = error {
+            print("❌ Presentation error: \(error.localizedDescription)")
+            Task { @MainActor in
+                self.service?.handleError(error)
+            }
+            return
+        }
+        
+        print("✅ Room captured successfully")
+        Task { @MainActor in
+            self.service?.handleCapturedRoom(processedResult)
+        }
+    }
+    
+    func captureView(didFailWithError error: Error) {
+        print("❌ Capture failed: \(error.localizedDescription)")
+        Task { @MainActor in
+            self.service?.handleError(error)
+        }
     }
 }
 
@@ -187,58 +187,3 @@ enum RoomPlanError: LocalizedError {
         }
     }
 }
-
-// MARK: - Delegate Wrapper
-@objc(FloorPlanRoomCaptureDelegate)
-private final class RoomCaptureDelegate: NSObject, RoomCaptureViewDelegate, NSSecureCoding {
-    static var supportsSecureCoding: Bool { true }
-    
-    weak var service: RoomPlanService?
-    
-    init(service: RoomPlanService) {
-        self.service = service
-        super.init()
-    }
-    
-    required init?(coder: NSCoder) {
-        super.init()
-    }
-    
-    func encode(with coder: NSCoder) {
-        // No encoding needed - this is just a delegate
-    }
-    
-    func captureView(shouldPresent roomDataForProcessing: CapturedRoomData, error: Error?) -> Bool {
-        if let error = error {
-            print("❌ RoomPlan processing error: \(error)")
-            Task { @MainActor in
-                self.service?.handleScanError(error)
-            }
-            return false
-        }
-        return true
-    }
-    
-    func captureView(didPresent processedResult: CapturedRoom, error: Error?) {
-        Task { @MainActor in
-            guard let service = self.service else { return }
-            
-            if let error = error {
-                print("❌ RoomPlan presentation error: \(error)")
-                service.handleScanError(error)
-                return
-            }
-            
-            print("✅ Room data received from RoomPlan")
-            service.handleScanCompletion(room: processedResult)
-        }
-    }
-    
-    func captureView(didFailWithError error: Error) {
-        print("❌ RoomPlan capture failed: \(error)")
-        Task { @MainActor in
-            self.service?.handleScanError(error)
-        }
-    }
-}
-
