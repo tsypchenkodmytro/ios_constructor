@@ -27,6 +27,7 @@ struct Viewport {
             .rotated(by: rotation)
             .scaledBy(x: scale, y: scale)
     }
+    
 }
 
 struct FloorPlanSpriteKitView: View {
@@ -173,6 +174,9 @@ struct FloorPlanSpriteKitView: View {
         }
     }
 }
+
+
+
 
 // MARK: - ShareSheet
 struct ShareSheet: UIViewControllerRepresentable {
@@ -463,8 +467,9 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             let wallNode = SKShapeNode(path: wallPath)
             wallNode.strokeColor = UIColor.black
             wallNode.lineWidth = max(3.0, Constants.wallLineWidth / (currentScale / initialScale))
-            wallNode.lineCap = .round
-            wallNode.glowWidth = 0.5
+            wallNode.lineCap = .square
+            wallNode.lineJoin = .miter
+            wallNode.glowWidth = 0.0
             
             wallsLayer.addChild(wallNode)
         }
@@ -472,84 +477,79 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
     
     private func drawDoors() {
         doorsLayer.removeAllChildren()
+        // Determine room center to orient arc outward
+        let b = calculateBounds()
+        let roomCenter = CGPoint(x: CGFloat((b.maxX + b.minX)/2) * currentScale,
+                                  y: -CGFloat((b.maxZ + b.minZ)/2) * currentScale)
         for door in roomStructure.doors {
             let (start, end) = calculateWallEndpoints(surface: door)
 
             // Match window design: erase wall segment under the door
             let angle = atan2(end.y - start.y, end.x - start.x)
-            let perpAngle = angle + .pi / 2
+            let nPlus = angle + .pi / 2
+            let nMinus = angle - .pi / 2
             let currentWallWidth = max(3.0, Constants.wallLineWidth / (currentScale / initialScale))
-            let eraserWidth = currentWallWidth + 2.0
+            let eraserWidth = currentWallWidth
+            // Extend erase beyond endpoints to remove minute gaps at joints
+            let dirLen = max(1e-6, hypot(end.x - start.x, end.y - start.y))
+            let ux = (end.x - start.x) / dirLen
+            let uy = (end.y - start.y) / dirLen
             let erasePath = CGMutablePath()
             erasePath.move(to: start)
             erasePath.addLine(to: end)
+            
             let eraseNode = SKShapeNode(path: erasePath)
             eraseNode.strokeColor = .white
             eraseNode.lineWidth = eraserWidth
-            eraseNode.lineCap = .butt
+            eraseNode.lineCap = .square
             doorsLayer.addChild(eraseNode)
-
-            // Draw two thin, parallel light-gray lines for door frame
-            // Make them shorter than the full opening to represent door frame properly
-            let offset: CGFloat = 2.0
-            let offsetX = offset * cos(perpAngle)
-            let offsetY = offset * sin(perpAngle)
             
-            // Shorten the door frame lines by 10% on each end to create proper door frame
+            // Compute frame endpoints (for leaf length)
             let doorFrameInset: CGFloat = 0.1
-            let dx = (end.x - start.x) * doorFrameInset
-            let dy = (end.y - start.y) * doorFrameInset
             
-            let frameStart = CGPoint(x: start.x + dx, y: start.y + dy)
-            let frameEnd = CGPoint(x: end.x - dx, y: end.y - dy)
+            // Determine inward normal based on room center so arc swings inside the room
+            let toCenter = CGPoint(x: roomCenter.x - start.x, y: roomCenter.y - start.y)
+            let dPlus = toCenter.x * cos(nPlus) + toCenter.y * sin(nPlus)
+            let perpAngle = dPlus > 0 ? nPlus : nMinus
+//            let nx = cos(perpAngle)
+//            let ny = sin(perpAngle)
 
-            let line1Start = CGPoint(x: frameStart.x + offsetX, y: frameStart.y + offsetY)
-            let line1End = CGPoint(x: frameEnd.x + offsetX, y: frameEnd.y + offsetY)
-            let path1 = CGMutablePath()
-            path1.move(to: line1Start)
-            path1.addLine(to: line1End)
-            let node1 = SKShapeNode(path: path1)
-            node1.strokeColor = UIColor.lightGray
-            node1.lineWidth = 1.5
-            node1.lineCap = .butt
-            doorsLayer.addChild(node1)
-
-            let line2Start = CGPoint(x: frameStart.x - offsetX, y: frameStart.y - offsetY)
-            let line2End = CGPoint(x: frameEnd.x - offsetX, y: frameEnd.y - offsetY)
-            let path2 = CGMutablePath()
-            path2.move(to: line2Start)
-            path2.addLine(to: line2End)
-            let node2 = SKShapeNode(path: path2)
-            node2.strokeColor = UIColor.lightGray
-            node2.lineWidth = 1.5
-            node2.lineCap = .butt
-            doorsLayer.addChild(node2)
+            let hingePoint = start
 
             // Draw the door swing arc in the same thin light-gray style
-            // Use the actual door opening center as the hinge point
             let doorWidth = hypot(end.x - start.x, end.y - start.y)
-            let arcRadius = min(doorWidth * 0.85, 45.0)
-            
-            // Use the actual door frame endpoint as the hinge point
-            // The arc should start exactly from where the door frame meets the wall
-            let hingePoint = frameStart  // Use the door frame start as hinge point
-            
-            // Calculate arc angles based on door orientation
-            // The arc should sweep 90 degrees inward into the room
-            let doorAngle = angle // angle of the door opening line
+            let arcRadius = max(4.0, min(doorWidth - currentWallWidth * 0.8, 60.0))
+            let doorAngle = angle
             let arcStartAngle = doorAngle
-            let arcEndAngle = doorAngle - .pi / 2  // Reverse direction to open inward
-            
+            let sign: CGFloat = (perpAngle == nPlus) ? 1.0 : -1.0
+            let arcEndAngle = doorAngle + sign * (.pi / 2)
             let arcPath = UIBezierPath(arcCenter: hingePoint,
                                        radius: arcRadius,
                                        startAngle: arcStartAngle,
                                        endAngle: arcEndAngle,
-                                       clockwise: false)  // Counter-clockwise for inward opening
+                                       clockwise: sign > 0)
+            
+            
+            
+            
             let arcNode = SKShapeNode(path: arcPath.cgPath)
-            arcNode.strokeColor = UIColor.lightGray
-            arcNode.lineWidth = 1.5
+            arcNode.strokeColor = UIColor.black
+            arcNode.lineWidth = 0.5
             arcNode.lineCap = .round
+            arcNode.lineJoin = .round
             doorsLayer.addChild(arcNode)
+
+            let leafLen = arcRadius
+            let leafEnd = CGPoint(x: hingePoint.x + cos(arcEndAngle) * leafLen,
+                                  y: hingePoint.y + sin(arcEndAngle) * leafLen)
+            let leafPath = CGMutablePath()
+            leafPath.move(to: hingePoint)
+            leafPath.addLine(to: leafEnd)
+            let leafNode = SKShapeNode(path: leafPath)
+            leafNode.strokeColor = UIColor.black
+            leafNode.lineWidth = 0.5
+            leafNode.lineCap = .round
+            doorsLayer.addChild(leafNode)
         }
     }
     
@@ -562,7 +562,7 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             let angle = atan2(end.y - start.y, end.x - start.x)
             let perpAngle = angle + .pi / 2
             let currentWallWidth = max(3.0, Constants.wallLineWidth / (currentScale / initialScale))
-            let eraserWidth = currentWallWidth + 2.0
+            let eraserWidth = currentWallWidth + 1.5
             let erasePath = CGMutablePath()
             erasePath.move(to: start)
             erasePath.addLine(to: end)
@@ -573,7 +573,7 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             windowsLayer.addChild(eraseNode)
 
             // Draw two light, parallel strokes as the window borders
-            let offset: CGFloat = 2.0
+            let offset: CGFloat = 1.5
             let offsetX = offset * cos(perpAngle)
             let offsetY = offset * sin(perpAngle)
 
@@ -583,9 +583,9 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             path1.move(to: line1Start)
             path1.addLine(to: line1End)
             let node1 = SKShapeNode(path: path1)
-            node1.strokeColor = UIColor.lightGray
-            node1.lineWidth = 1.5
-            node1.lineCap = .butt
+            node1.strokeColor = UIColor.black
+            node1.lineWidth = 0.05
+            node1.lineCap = .round
             windowsLayer.addChild(node1)
 
             let line2Start = CGPoint(x: start.x - offsetX, y: start.y - offsetY)
@@ -594,10 +594,20 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             path2.move(to: line2Start)
             path2.addLine(to: line2End)
             let node2 = SKShapeNode(path: path2)
-            node2.strokeColor = UIColor.lightGray
-            node2.lineWidth = 1.5
-            node2.lineCap = .butt
+            node2.strokeColor = UIColor.black
+            node2.lineWidth = 0.05
+            node2.lineCap = .round
             windowsLayer.addChild(node2)
+
+            // Add center line to make window a 3-line symbol
+            let path3 = CGMutablePath()
+            path3.move(to: start)
+            path3.addLine(to: end)
+            let node3 = SKShapeNode(path: path3)
+            node3.strokeColor = UIColor.black
+            node3.lineWidth = 0.05
+            node3.lineCap = .round
+            windowsLayer.addChild(node3)
         }
     }
 

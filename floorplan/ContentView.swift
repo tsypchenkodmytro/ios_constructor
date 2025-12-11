@@ -45,6 +45,7 @@ struct ContentView: View {
         }
         .accentColor(.blue)
         .environmentObject(dataService)
+        .preferredColorScheme(.dark)
     }
     
     private var supportsRoomPlan: Bool {
