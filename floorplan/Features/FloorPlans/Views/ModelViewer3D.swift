@@ -19,13 +19,13 @@ struct ModelViewer3D: View {
     var body: some View {
         NavigationView {
             Group {
-                if useQuickLook {
-                    QuickLookPreview(url: url,
-                                     roomName: roomName,
-                                     dismiss: dismiss)
-                } else {
+//                if useQuickLook {
+//                    QuickLookPreview(url: url,
+//                                     roomName: roomName,
+//                                     dismiss: dismiss)
+//                } else {
                     SceneKitModelView(url: url)
-                }
+//                }
             }
             .navigationBarTitleDisplayMode(.inline)
             .navigationTitle(roomName)
@@ -40,19 +40,19 @@ struct ModelViewer3D: View {
                         }
                     }
                 }
-                // 🔁 Toggle View Button
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: {
-                        withAnimation(.easeInOut) {
-                            useQuickLook.toggle()
-                        }
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: useQuickLook ? "cube" : "eye")
-                            Text(useQuickLook ? "Coloring View" : "Simple Preview")
-                        }
-                    }
-                }
+//                // 🔁 Toggle View Button
+//                ToolbarItem(placement: .navigationBarTrailing) {
+//                    Button(action: {
+//                        withAnimation(.easeInOut) {
+//                            useQuickLook.toggle()
+//                        }
+//                    }) {
+//                        HStack(spacing: 6) {
+//                            Image(systemName: useQuickLook ? "cube" : "eye")
+//                            Text(useQuickLook ? "Coloring View" : "Simple Preview")
+//                        }
+//                    }
+//                }
             }
         }
     }
