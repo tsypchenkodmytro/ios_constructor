@@ -492,30 +492,6 @@ class FloorPlanScene: SKScene, UIGestureRecognizerDelegate {
             let eraserWidth = currentWallWidth
             // Extend erase beyond endpoints to remove minute gaps at joints
             let dirLen = max(1e-6, hypot(end.x - start.x, end.y - start.y))
-//            let ux = (end.x - start.x) / dirLen
-//            let uy = (end.y - start.y) / dirLen
-            
-            //weoking
-//            let shorten: CGFloat = 3.6   // how much to decrease the end point
-//
-//            let dx = end.x - start.x
-//            let dy = end.y - start.y
-//            let length = max(1e-6, hypot(dx, dy))
-//
-//            // Unit direction
-//            let ux = dx / length
-//            let uy = dy / length
-//
-//            // Move end BACK along the line
-//            let shortenedEnd = CGPoint(
-//                x: end.x - ux * shorten,
-//                y: end.y - uy * shorten
-//            )
-//
-//            
-//            let erasePath = CGMutablePath()
-//            erasePath.move(to: start)
-//            erasePath.addLine(to: shortenedEnd)
             
             
             let shortenStart: CGFloat = 0.4   // trim at start
